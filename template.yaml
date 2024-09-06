@@ -5,7 +5,7 @@
 # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/format-version-structure.html
 AWSTemplateFormatVersion: 2010-09-09
 Description: >-
-  aws-resources
+  s3-resources
 
 Parameters:
   AppName:
@@ -28,7 +28,7 @@ Parameters:
     Default: yourCertificateId
   DefaultImage:
     Type: String
-    Default: https://assets.myapp.com/default.jpg
+    Default: https://dtvu02rw3qzo8.cloudfront.net/default.png
 
 Resources:
   FilesTable:
@@ -158,10 +158,10 @@ Resources:
                   - s3:PutObjectAcl
                 Resource: 
                   - !Sub
-                    - 'arn:aws:s3:::${Bucket}/images/*'
+                    - 'arn:aws:s3:::${Bucket}/*'
                     - Bucket: !Ref UploadBucket
                   - !Sub
-                    - 'arn:aws:s3:::${Bucket}/images/*'
+                    - 'arn:aws:s3:::${Bucket}/*'
                     - Bucket: !Ref AssetsBucket
         - PolicyName: DynamoDBAccess
           PolicyDocument:
@@ -206,9 +206,6 @@ Resources:
                 if (response.status >= 400 && response.status <= 599) {
                   response.status = 302;
                   response.statusDescription = 'Found';
-
-                  /* Drop the body, as it is not required for redirects */
-                  response.body = '';
                   response.headers['location'] = [{ key: 'Location', value: '${DefaultImage}' }];
                 }
 
@@ -286,7 +283,7 @@ Resources:
               Service:
                 - cloudfront.amazonaws.com
             Resource: !Sub
-              - 'arn:aws:s3:::${Bucket}/images/*'
+              - 'arn:aws:s3:::${Bucket}/*'
               - Bucket: !Ref AssetsBucket
             Condition:
               StringEquals:
