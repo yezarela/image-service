@@ -201,11 +201,18 @@ Resources:
           Fn::Sub: 
             - |
               exports.handler = (event, context, callback) => {
-                const request = event.Records[0].cf.request;
+                const response = event.Records[0].cf.response;
 
-                request.uri = "${DefaultImage}"
+                if (response.status >= 400 && response.status <= 599) {
+                  response.status = 302;
+                  response.statusDescription = 'Found';
 
-                callback(null, request);
+                  /* Drop the body, as it is not required for redirects */
+                  response.body = '';
+                  response.headers['location'] = [{ key: 'Location', value: '${DefaultImage}' }];
+                }
+
+                callback(null, response);
               };
             - {
               DefaultImage: !Ref DefaultImage
