@@ -1,0 +1,28 @@
+version = 0.1
+
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "myapp-resources-dev"
+s3_bucket = "com.myapp.dev.deploys"
+s3_prefix = "myapp-resources-dev"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+image_repositories = []
+parameter_overrides = "Stage=dev"
+tags = "env=\"dev\""
+
+[prod]
+[prod.deploy]
+[prod.deploy.parameters]
+stack_name = "myapp-resources-prod"
+s3_bucket = "com.myapp.prod.deploys"
+s3_prefix = "myapp-resources-prod"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+image_repositories = []
+parameter_overrides = "Stage=prod CloudfrontAlias=assets.myapp.com"
+tags = "env=\"prod\""
+

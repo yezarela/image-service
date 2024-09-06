@@ -1,0 +1,288 @@
+# This is the SAM template that represents the architecture of your serverless application
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-template-basics.html
+
+# The AWSTemplateFormatVersion identifies the capabilities of the template
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/format-version-structure.html
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  aws-resources
+
+Parameters:
+  AppName:
+    Type: String
+    Default: myapp
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  CloudfrontAlias:
+    Type: String
+    Default: assets.dev.myapp.com
+    AllowedValues:
+      - assets.dev.myapp.com
+      - assets.myapp.com
+  AcmCertificateId:
+    Type: String
+    Default: yourCertificateId
+  DefaultImage:
+    Type: String
+    Default: https://assets.myapp.com/default.jpg
+
+Resources:
+  FilesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub '${AppName}-${Stage}-Files'
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: orgId
+          AttributeType: S
+        - AttributeName: parentIdCreatedAt
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: orgId_createdAt
+          KeySchema:
+            - AttributeName: orgId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+        - IndexName: orgId_parentIdCreatedAt
+          KeySchema:
+            - AttributeName: orgId
+              KeyType: HASH
+            - AttributeName: parentIdCreatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  ObjectCreatedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: 'Object Created Fanout Topic'
+      TopicName: !Sub '${AppName}-${Stage}-object-created'
+
+  ObjectCreatedTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - Ref: ObjectCreatedTopic
+      PolicyDocument:
+        Statement:
+          - Sid: 'S3toSNS'
+            Effect: Allow
+            Action: sns:Publish
+            Principal:
+              Service: s3.amazonaws.com
+            Resource:
+              Ref: ObjectCreatedTopic
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:s3:::com.${AppName}.${Stage}.uploads'
+
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    DependsOn: ObjectCreatedTopicPolicy
+    Properties:
+      BucketName: !Sub 'com.${AppName}.${Stage}.uploads'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Topic: !Ref ObjectCreatedTopic
+            Event: 's3:ObjectCreated:Put'
+            # TODO: Filter only image objects
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub 'com.${AppName}.${Stage}.assets'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    DependsOn: 
+      - FilesTable
+      - AssetsBucket
+      - UploadBucket
+    Properties:
+      RoleName: !Sub '${AppName}-${Stage}-LambdaRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - edgelambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: 
+                  - !Sub
+                    - 'arn:aws:s3:::${Bucket}/images/*'
+                    - Bucket: !Ref UploadBucket
+                  - !Sub
+                    - 'arn:aws:s3:::${Bucket}/images/*'
+                    - Bucket: !Ref AssetsBucket
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:ListStreams
+                  - dynamodb:DescribeStream
+                  - dynamodb:DescribeLimits
+                Resource: 
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}'
+                    - TableName: !Ref FilesTable
+                  - !Sub 
+                    - 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}/index/*'
+                    - TableName: !Ref FilesTable
+
+  EdgeLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaRole
+    Properties:
+      FunctionName: !Sub '${AppName}-${Stage}-default-image'
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: nodejs18.x
+      MemorySize: 128
+      Timeout: 5
+      Code:
+        ZipFile:
+          Fn::Sub: 
+            - |
+              exports.handler = (event, context, callback) => {
+                const request = event.Records[0].cf.request;
+
+                request.uri = "${DefaultImage}"
+
+                callback(null, request);
+              };
+            - {
+              DefaultImage: !Ref DefaultImage
+            }
+  
+  EdgeLambdaVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !GetAtt EdgeLambda.Arn
+
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: Origin access control for assets bucket
+        Name: !GetAtt AssetsBucket.RegionalDomainName
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: AssetsBucketOrigin
+            DomainName: !GetAtt AssetsBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
+            S3OriginConfig: {}
+        Enabled: 'true'
+        Comment: Cloudfront distribution config for assets bucket
+        # Uncomment below lines if you need custom domain
+        # Aliases:
+        #   - !Ref CloudfrontAlias
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          TargetOriginId: AssetsBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: '658327ea-f89d-4fab-a63d-7e88639e58f6'
+          LambdaFunctionAssociations:
+            - EventType: origin-response
+              LambdaFunctionARN: !Join
+                - ':'
+                - - !GetAtt [EdgeLambda, Arn]
+                  - !GetAtt [EdgeLambdaVersion, Version]
+        PriceClass: PriceClass_200
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          # Uncomment below lines if you need custom domain
+          # AcmCertificateArn: !Sub 'arn:aws:acm:us-east-1:${AWS::AccountId}:certificate/${AcmCertificateId}'
+          # MinimumProtocolVersion: TLSv1
+          # SslSupportMethod: sni-only
+
+  AssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Sid: 'AllowCloudFrontService'
+            Action: s3:GetObject
+            Principal:
+              Service:
+                - cloudfront.amazonaws.com
+            Resource: !Sub
+              - 'arn:aws:s3:::${Bucket}/images/*'
+              - Bucket: !Ref AssetsBucket
+            Condition:
+              StringEquals:
+                'aws:SourceArn': !Sub
+                  - 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontId}'
+                  - CloudFrontId: !GetAtt CloudFrontDistribution.Id
